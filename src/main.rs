@@ -1,28 +1,27 @@
-// use std::env;
-// use std::fs;
 use clap::Parser;
+use std::fs;
 
 #[derive(Parser)]
-enum Subcommand
-{
+enum Subcommand {
     /// Initializes an empty repository
     Init,
 }
 
+fn cmd_init() -> anyhow::Result<()> {
+    fs::create_dir(".git")?;
+    fs::create_dir(".git/objects")?;
+    fs::create_dir(".git/refs")?;
+    fs::write(".git/HEAD", "ref: refs/heads/master\n")?;
+    Ok(())
+}
+
 fn main() {
-    match Subcommand::parse() {
-        Subcommand::Init => todo!(),
+    let res = match Subcommand::parse() {
+        Subcommand::Init => cmd_init(),
     };
 
-    // Uncomment this block to pass the first stage
-    // let args: Vec<String> = env::args().collect();
-    // if args[1] == "init" {
-    //     fs::create_dir(".git").unwrap();
-    //     fs::create_dir(".git/objects").unwrap();
-    //     fs::create_dir(".git/refs").unwrap();
-    //     fs::write(".git/HEAD", "ref: refs/heads/master\n").unwrap();
-    //     println!("Initialized git directory")
-    // } else {
-    //     println!("unknown command: {}", args[1])
-    // }
+    if let Err(error) = res {
+        eprintln!("Error during command execution: {:?}", error);
+        panic!("Failed!");
+    }
 }
