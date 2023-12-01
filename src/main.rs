@@ -1,11 +1,18 @@
-#[allow(unused_imports)]
-use std::env;
-#[allow(unused_imports)]
-use std::fs;
+// use std::env;
+// use std::fs;
+use clap::Parser;
+
+#[derive(Parser)]
+enum Subcommand
+{
+    /// Initializes an empty repository
+    Init,
+}
 
 fn main() {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    println!("Logs from your program will appear here!");
+    match Subcommand::parse() {
+        Subcommand::Init => todo!(),
+    };
 
     // Uncomment this block to pass the first stage
     // let args: Vec<String> = env::args().collect();
