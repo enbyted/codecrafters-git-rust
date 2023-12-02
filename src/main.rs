@@ -11,6 +11,8 @@ enum Subcommand {
     Init,
     /// Reads a specific object from repository
     CatFile(CatFileArgs),
+    /// Calculates hash for an object, optionally saves it to repository
+    HashObject(HashObjectArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -21,6 +23,16 @@ struct CatFileArgs {
     /// Automatically pretty-print based on object type
     #[arg(short)]
     pretty_print: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct HashObjectArgs {
+    /// The file to read data from
+    #[arg(required(true), index(1))]
+    file: String,
+    /// Automatically pretty-print based on object type
+    #[arg(short)]
+    write: bool,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -138,16 +150,32 @@ impl Repository {
             Err(anyhow::Error::msg("Could not find requested object"))
         }
     }
+
+    pub fn save_object(&self, object: &Object) -> anyhow::Result<()> {
+        let hash = object.hash();
+        let container_path = self.path.join("objects/").join(&hash[..4]);
+        let file_path = container_path.join(&hash[5..]);
+        fs::create_dir_all(container_path)?;
+        object.write_to(&file_path)
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Object {
-    path: PathBuf,
     contents: Vec<u8>,
     kind: String,
 }
 
 impl Object {
+    pub fn new(kind: &str, contents: &[u8]) -> Object {
+        assert!(kind.is_ascii());
+        assert!(!kind.is_empty());
+        Object {
+            kind: kind.to_owned(),
+            contents: contents.to_owned(),
+        }
+    }
+
     fn from_path(path: &PathBuf) -> anyhow::Result<Object> {
         let file = fs::File::open(path)?;
         let mut decoder = flate2::read::ZlibDecoder::new(&file);
@@ -173,7 +201,6 @@ impl Object {
         anyhow::ensure!(object_size == object_data.len());
 
         Ok(Object {
-            path: path.clone(),
             kind: object_type.to_owned(),
             contents: object_data.to_owned(),
         })
@@ -187,6 +214,16 @@ impl Object {
         hasher.update(b"\0");
         hasher.update(&self.contents);
         format!("{:02x}", hasher.finalize())
+    }
+
+    pub fn write_to(&self, path: &PathBuf) -> anyhow::Result<()> {
+        let mut file = fs::File::create(path)?;
+        file.write_all(self.kind.as_bytes())?;
+        file.write_all(b" ")?;
+        file.write_all(self.contents.len().to_string().as_bytes())?;
+        file.write_all(&self.contents)?;
+        file.flush()?;
+        Ok(())
     }
 }
 
@@ -205,10 +242,26 @@ fn cmd_cat_file(args: CatFileArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cmd_hash_object(args: HashObjectArgs) -> anyhow::Result<()> {
+    let mut data = Vec::new();
+    let mut file = fs::File::open(&args.file)?;
+    file.read_to_end(&mut data)?;
+    drop(file);
+
+    let object = Object::new("blob", &data);
+    println!("{}", object.hash());
+    if args.write {
+        let repo = Repository::find_from_current_dir()?;
+        repo.save_object(&object)?;
+    }
+    Ok(())
+}
+
 fn main() {
     let res = match Subcommand::parse() {
         Subcommand::Init => cmd_init(),
         Subcommand::CatFile(args) => cmd_cat_file(args),
+        Subcommand::HashObject(args) => cmd_hash_object(args),
     };
 
     if let Err(error) = res {
