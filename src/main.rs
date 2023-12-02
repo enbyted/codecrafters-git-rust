@@ -2,6 +2,7 @@ use clap::{
     builder::{ValueParser, ValueParserFactory},
     Args, Parser,
 };
+use sha1::{Digest, Sha1};
 use std::{fs, io::Read, io::Write, path::PathBuf};
 
 #[derive(Parser)]
@@ -38,6 +39,10 @@ impl ObjectRef {
 
     fn matches_remainder(&self, remainder: &str) -> bool {
         remainder.eq_ignore_ascii_case(&self.0[2..])
+    }
+
+    fn matches(&self, hash: &str) -> bool {
+        self.0.eq_ignore_ascii_case(hash)
     }
 }
 
@@ -123,7 +128,9 @@ impl Repository {
             });
 
             if let Some(object_path) = maybe_object_path {
-                Object::from_path(&object_path)
+                let object = Object::from_path(&object_path)?;
+                anyhow::ensure!(object_ref.matches(&object.hash()));
+                Ok(object)
             } else {
                 Err(anyhow::Error::msg("Could not find requested object"))
             }
@@ -170,6 +177,16 @@ impl Object {
             kind: object_type.to_owned(),
             contents: object_data.to_owned(),
         })
+    }
+
+    pub fn hash(&self) -> String {
+        let mut hasher = Sha1::new();
+        hasher.update(self.kind.as_bytes());
+        hasher.update(b" ");
+        hasher.update(self.contents.len().to_string().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&self.contents);
+        format!("{:02x}", hasher.finalize())
     }
 }
 
