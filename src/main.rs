@@ -2,7 +2,10 @@ use clap::{
     builder::{ValueParser, ValueParserFactory},
     Args, Parser,
 };
-use std::{fs, path::PathBuf};
+use std::{
+    fs::{self, FileType},
+    path::PathBuf,
+};
 
 #[derive(Parser)]
 enum Subcommand {
@@ -53,7 +56,31 @@ impl Repository {
     }
 
     pub fn find_from_current_dir() -> anyhow::Result<Repository> {
-        todo!("Search for .git directory in current dir or its parents");
+        let mut current_dir = std::env::current_dir()?;
+        // TODO: Arbitrary depth limit of 50, make it configurable
+        for _ in 0..50 {
+            let maybe_path = fs::read_dir(&current_dir)?.find_map(|d| {
+                let dir = d.ok()?;
+                if dir.file_type().ok()?.is_dir() && dir.file_name() == ".git" {
+                    Some(dir.path())
+                } else {
+                    None
+                }
+            });
+
+            if let Some(path) = maybe_path {
+                return Ok(Repository { path });
+            }
+            if !current_dir.pop() {
+                return Err(anyhow::Error::msg(
+                    "Git repository not found (reached root)",
+                ));
+            }
+        }
+        Err(anyhow::Error::msg(format!(
+            "Git repository not found (depth limit reached at {:?})",
+            current_dir
+        )))
     }
 
     pub fn init(&self) -> anyhow::Result<()> {
@@ -67,11 +94,13 @@ impl Repository {
 
 fn cmd_init() -> anyhow::Result<()> {
     let repo = Repository::from_current_dir()?;
+    println!("Creating git repository in {:?}", repo.path);
     repo.init()
 }
 
 fn cmd_cat_file(args: CatFileArgs) -> anyhow::Result<()> {
-    let _repo = Repository::find_from_current_dir()?;
+    let repo = Repository::find_from_current_dir()?;
+    println!("Git repository found in {:?}", repo.path);
     todo!("Search for object {:?}", args.object);
 }
 
