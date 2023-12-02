@@ -153,8 +153,9 @@ impl Repository {
 
     pub fn save_object(&self, object: &Object) -> anyhow::Result<()> {
         let hash = object.hash();
-        let container_path = self.path.join("objects/").join(&hash[..4]);
-        let file_path = container_path.join(&hash[5..]);
+        let (prefix, remainder) = hash.as_str().split_at(2);
+        let container_path = self.path.join("objects/").join(prefix);
+        let file_path = container_path.join(remainder);
         fs::create_dir_all(container_path)?;
         object.write_to(&file_path)
     }
@@ -217,12 +218,14 @@ impl Object {
     }
 
     pub fn write_to(&self, path: &PathBuf) -> anyhow::Result<()> {
-        let mut file = fs::File::create(path)?;
-        file.write_all(self.kind.as_bytes())?;
-        file.write_all(b" ")?;
-        file.write_all(self.contents.len().to_string().as_bytes())?;
-        file.write_all(&self.contents)?;
-        file.flush()?;
+        let file = fs::File::create(path)?;
+        let mut encoder = flate2::write::ZlibEncoder::new(file, flate2::Compression::fast());
+        encoder.write_all(self.kind.as_bytes())?;
+        encoder.write_all(b" ")?;
+        encoder.write_all(self.contents.len().to_string().as_bytes())?;
+        encoder.write_all(b"\0")?;
+        encoder.write_all(&self.contents)?;
+        encoder.flush()?;
         Ok(())
     }
 }
@@ -252,6 +255,7 @@ fn cmd_hash_object(args: HashObjectArgs) -> anyhow::Result<()> {
     println!("{}", object.hash());
     if args.write {
         let repo = Repository::find_from_current_dir()?;
+        eprintln!("Git repository found in {:?}", repo.path);
         repo.save_object(&object)?;
     }
     Ok(())
