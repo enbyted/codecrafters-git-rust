@@ -13,6 +13,8 @@ enum Subcommand {
     CatFile(CatFileArgs),
     /// Calculates hash for an object, optionally saves it to repository
     HashObject(HashObjectArgs),
+    /// Print out contents of a tree object
+    LsTree(LsTreeArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -23,6 +25,16 @@ struct CatFileArgs {
     /// Automatically pretty-print based on object type
     #[arg(short)]
     pretty_print: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct LsTreeArgs {
+    /// The object hash to read out
+    #[arg(required(true), index(1))]
+    object: ObjectRef,
+    /// Automatically pretty-print based on object type
+    #[arg(long)]
+    name_only: bool,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -141,7 +153,7 @@ impl Repository {
 
             if let Some(object_path) = maybe_object_path {
                 let object = Object::from_path(&object_path)?;
-                anyhow::ensure!(object_ref.matches(&object.hash()));
+                anyhow::ensure!(object_ref.matches(&object.hash_string()));
                 Ok(object)
             } else {
                 Err(anyhow::Error::msg("Could not find requested object"))
@@ -152,7 +164,7 @@ impl Repository {
     }
 
     pub fn save_object(&self, object: &Object) -> anyhow::Result<()> {
-        let hash = object.hash();
+        let hash = object.hash_string();
         let (prefix, remainder) = hash.as_str().split_at(2);
         let container_path = self.path.join("objects/").join(prefix);
         let file_path = container_path.join(remainder);
@@ -162,21 +174,77 @@ impl Repository {
 }
 
 #[derive(Debug, Clone)]
-struct Object {
-    contents: Vec<u8>,
-    kind: String,
+struct TreeItem<'a> {
+    mode: u32,
+    name: &'a str,
+    hash: &'a [u8; 20],
+}
+
+impl<'a> TreeItem<'a> {
+    pub fn parse<'s>(data: &'s [u8]) -> anyhow::Result<(&'s [u8], TreeItem<'s>)> {
+        let index_first_zero = data.iter().position(|b| *b == 0u8).ok_or_else(|| {
+            anyhow::Error::msg("Invalid tree item data, could not find filename terminator")
+        })?;
+        let (header, rest) = data.split_at(index_first_zero);
+        let (hash, rest) = rest[1..].split_at(20);
+        let (mode, name) = std::str::from_utf8(header)?
+            .split_once(' ')
+            .ok_or_else(|| {
+                anyhow::Error::msg(
+                    "Invalid tree item data, could not find split between mode and filename.",
+                )
+            })?;
+
+        Ok((
+            rest,
+            TreeItem {
+                mode: u32::from_str_radix(mode, 8)?,
+                name,
+                hash: hash.try_into()?,
+            },
+        ))
+    }
+
+    pub fn is_file(&self) -> bool {
+        0 == (self.mode & (1 << 16))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TreeDataIterator<'a> {
+    data: &'a [u8],
+}
+
+impl<'a> Iterator for TreeDataIterator<'a> {
+    type Item = TreeItem<'a>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let (rest, item) = TreeItem::parse(self.data).ok()?;
+        self.data = rest;
+        Some(item)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TreeData {
+    data: Vec<u8>,
+}
+
+impl TreeData {
+    pub fn iter(&self) -> TreeDataIterator<'_> {
+        TreeDataIterator { data: &self.data }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum Object {
+    Unknown { kind: String, data: Vec<u8> },
+    Blob(Vec<u8>),
+    Commit(String),
+    Tree(TreeData),
 }
 
 impl Object {
-    pub fn new(kind: &str, contents: &[u8]) -> Object {
-        assert!(kind.is_ascii());
-        assert!(!kind.is_empty());
-        Object {
-            kind: kind.to_owned(),
-            contents: contents.to_owned(),
-        }
-    }
-
     fn from_path(path: &PathBuf) -> anyhow::Result<Object> {
         let file = fs::File::open(path)?;
         let mut decoder = flate2::read::ZlibDecoder::new(&file);
@@ -201,30 +269,59 @@ impl Object {
         let object_size = object_size.parse::<usize>()?;
         anyhow::ensure!(object_size == object_data.len());
 
-        Ok(Object {
-            kind: object_type.to_owned(),
-            contents: object_data.to_owned(),
+        Ok(match object_type {
+            "blob" => Object::Blob(object_data.to_owned()),
+            "commit" => Object::Commit(std::str::from_utf8(object_data)?.to_owned()),
+            "tree" => Object::Tree(TreeData {
+                data: object_data.to_owned(),
+            }),
+            _ => Object::Unknown {
+                kind: object_type.to_owned(),
+                data: object_data.to_owned(),
+            },
         })
     }
 
-    pub fn hash(&self) -> String {
+    pub fn kind(&self) -> &str {
+        match self {
+            Object::Blob(_) => "blob",
+            Object::Commit(_) => "commit",
+            Object::Tree(_) => "tree",
+            Object::Unknown { kind, .. } => kind,
+        }
+    }
+
+    pub fn contents_bytes(&self) -> &[u8] {
+        match self {
+            Object::Blob(data) => data,
+            Object::Commit(text) => text.as_bytes(),
+            Object::Tree(data) => &data.data,
+            Object::Unknown { data, .. } => data,
+        }
+    }
+
+    pub fn hash(&self) -> [u8; 20] {
         let mut hasher = Sha1::new();
-        hasher.update(self.kind.as_bytes());
+        hasher.update(self.kind().as_bytes());
         hasher.update(b" ");
-        hasher.update(self.contents.len().to_string().as_bytes());
+        hasher.update(self.contents_bytes().len().to_string().as_bytes());
         hasher.update(b"\0");
-        hasher.update(&self.contents);
-        format!("{:02x}", hasher.finalize())
+        hasher.update(&self.contents_bytes());
+        hasher.finalize().into()
+    }
+
+    pub fn hash_string(&self) -> String {
+        self.hash().iter().map(|b| format!("{b:02x}")).collect()
     }
 
     pub fn write_to(&self, path: &PathBuf) -> anyhow::Result<()> {
         let file = fs::File::create(path)?;
         let mut encoder = flate2::write::ZlibEncoder::new(file, flate2::Compression::fast());
-        encoder.write_all(self.kind.as_bytes())?;
+        encoder.write_all(self.kind().as_bytes())?;
         encoder.write_all(b" ")?;
-        encoder.write_all(self.contents.len().to_string().as_bytes())?;
+        encoder.write_all(self.contents_bytes().len().to_string().as_bytes())?;
         encoder.write_all(b"\0")?;
-        encoder.write_all(&self.contents)?;
+        encoder.write_all(&self.contents_bytes())?;
         encoder.flush()?;
         Ok(())
     }
@@ -241,7 +338,52 @@ fn cmd_cat_file(args: CatFileArgs) -> anyhow::Result<()> {
     eprintln!("Git repository found in {:?}", repo.path);
     let obj = repo.find_object(&args.object)?;
     eprintln!("Found object: {:?}", obj);
-    std::io::stdout().lock().write_all(&obj.contents)?;
+    if args.pretty_print {
+        match obj {
+            Object::Blob(data) => std::io::stdout().lock().write_all(&data)?,
+            Object::Commit(text) => print!("{text}"),
+            Object::Tree(data) => {
+                for item in data.iter() {
+                    let mode = item.mode;
+                    let kind = if item.is_file() { "blob" } else { "tree" };
+                    let name = item.name;
+                    let hash: String = item.hash.iter().map(|b| format!("{b:02x}")).collect();
+                    println!("{mode:06o} {kind} {hash}    {name}");
+                }
+            }
+            _ => anyhow::bail!("Don't know how to pretty-print {obj:?}."),
+        }
+    } else {
+        std::io::stdout().lock().write_all(obj.contents_bytes())?;
+    }
+    Ok(())
+}
+
+fn cmd_ls_tree(args: LsTreeArgs) -> anyhow::Result<()> {
+    let repo = Repository::find_from_current_dir()?;
+    eprintln!("Git repository found in {:?}", repo.path);
+    let obj = repo.find_object(&args.object)?;
+    eprintln!("Found object: {:?}", obj);
+    match obj {
+        Object::Tree(data) => {
+            for item in data.iter() {
+                if args.name_only {
+                    println!("{}", item.name);
+                } else {
+                    let mode = item.mode;
+                    let kind = if item.is_file() { "blob" } else { "tree" };
+                    let name = item.name;
+                    let hash: String = item.hash.iter().map(|b| format!("{b:02x}")).collect();
+                    println!("{mode:06o} {kind} {hash}    {name}");
+                }
+            }
+        }
+        _ => anyhow::bail!(
+            "Not a tree object. {} is {}.",
+            obj.hash_string(),
+            obj.kind()
+        ),
+    }
     Ok(())
 }
 
@@ -251,8 +393,8 @@ fn cmd_hash_object(args: HashObjectArgs) -> anyhow::Result<()> {
     file.read_to_end(&mut data)?;
     drop(file);
 
-    let object = Object::new("blob", &data);
-    println!("{}", object.hash());
+    let object = Object::Blob(data);
+    println!("{}", object.hash_string());
     if args.write {
         let repo = Repository::find_from_current_dir()?;
         eprintln!("Git repository found in {:?}", repo.path);
@@ -266,6 +408,7 @@ fn main() {
         Subcommand::Init => cmd_init(),
         Subcommand::CatFile(args) => cmd_cat_file(args),
         Subcommand::HashObject(args) => cmd_hash_object(args),
+        Subcommand::LsTree(args) => cmd_ls_tree(args),
     };
 
     if let Err(error) = res {
