@@ -15,6 +15,8 @@ enum Subcommand {
     HashObject(HashObjectArgs),
     /// Print out contents of a tree object
     LsTree(LsTreeArgs),
+    /// Write current directory as a tree object
+    WriteTree,
 }
 
 #[derive(Debug, Clone, Args)]
@@ -403,12 +405,17 @@ fn cmd_hash_object(args: HashObjectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cmd_write_tree() -> anyhow::Result<()> {
+    todo!();
+}
+
 fn main() {
     let res = match Subcommand::parse() {
         Subcommand::Init => cmd_init(),
         Subcommand::CatFile(args) => cmd_cat_file(args),
         Subcommand::LsTree(args) => cmd_ls_tree(args),
         Subcommand::HashObject(args) => cmd_hash_object(args),
+        Subcommand::WriteTree => cmd_write_tree(),
     };
 
     if let Err(error) = res {
