@@ -407,8 +407,8 @@ fn main() {
     let res = match Subcommand::parse() {
         Subcommand::Init => cmd_init(),
         Subcommand::CatFile(args) => cmd_cat_file(args),
-        Subcommand::HashObject(args) => cmd_hash_object(args),
         Subcommand::LsTree(args) => cmd_ls_tree(args),
+        Subcommand::HashObject(args) => cmd_hash_object(args),
     };
 
     if let Err(error) = res {
