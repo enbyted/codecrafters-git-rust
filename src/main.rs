@@ -1,9 +1,16 @@
+use bytes::BufMut;
 use clap::{
     builder::{ValueParser, ValueParserFactory},
     Args, Parser,
 };
 use sha1::{Digest, Sha1};
-use std::{fs, io::Read, io::Write, path::PathBuf};
+use std::{
+    fs,
+    io::Read,
+    io::Write,
+    os::unix::fs::MetadataExt,
+    path::{Path, PathBuf},
+};
 
 #[derive(Parser)]
 enum Subcommand {
@@ -175,14 +182,14 @@ impl Repository {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct TreeItem<'a> {
     mode: u32,
     name: &'a str,
     hash: &'a [u8; 20],
 }
 
-impl<'a> TreeItem<'a> {
+impl TreeItem<'_> {
     pub fn parse<'s>(data: &'s [u8]) -> anyhow::Result<(&'s [u8], TreeItem<'s>)> {
         let index_first_zero = data.iter().position(|b| *b == 0u8).ok_or_else(|| {
             anyhow::Error::msg("Invalid tree item data, could not find filename terminator")
@@ -208,7 +215,7 @@ impl<'a> TreeItem<'a> {
     }
 
     pub fn is_file(&self) -> bool {
-        0 == (self.mode & (1 << 16))
+        0 != (self.mode & (1 << 15))
     }
 }
 
@@ -233,8 +240,28 @@ struct TreeData {
 }
 
 impl TreeData {
+    pub fn empty() -> TreeData {
+        TreeData { data: vec![] }
+    }
+
     pub fn iter(&self) -> TreeDataIterator<'_> {
         TreeDataIterator { data: &self.data }
+    }
+
+    pub fn add_object(&mut self, object: &Object, name: &str, mut mode: u32) -> anyhow::Result<()> {
+        if let Object::Tree(_) = object {
+            mode &= !(1 << 15);
+        } else {
+            mode |= 1 << 15;
+        }
+
+        let mode = format!("{mode:o}");
+        self.data.put(mode.as_bytes());
+        self.data.put_u8(b' ');
+        self.data.put(name.as_bytes());
+        self.data.put_u8(0);
+        self.data.put(&object.hash()[..]);
+        Ok(())
     }
 }
 
@@ -405,8 +432,57 @@ fn cmd_hash_object(args: HashObjectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn build_tree_for_directory(objects: &mut Vec<Object>, path: &Path) -> anyhow::Result<TreeData> {
+    let mut tree = TreeData::empty();
+
+    for file in fs::read_dir(path)? {
+        let file = file?;
+        let metadata = file.metadata()?;
+        let file_name = file
+            .file_name()
+            .to_str()
+            .ok_or_else(|| anyhow::Error::msg("Failed to parse filename"))?
+            .to_owned();
+        let (object, mode) = if metadata.is_dir() {
+            if file_name.starts_with('.') {
+                eprintln!("Skipping directory {:?}.", file.path());
+                continue;
+            }
+            (
+                Object::Tree(build_tree_for_directory(objects, &file.path())?),
+                0o040000,
+            )
+        } else if metadata.is_file() {
+            let object = Object::Blob(fs::read(file.path())?);
+            let is_executable = 0 != (metadata.mode() & 0o111);
+            let mode = if is_executable { 0o100755 } else { 0o100644 };
+            (object, mode)
+        } else {
+            todo!("Only directories and normal files are supported!")
+        };
+
+        tree.add_object(&object, &file_name, mode)?;
+        objects.push(object);
+    }
+
+    Ok(tree)
+}
+
 fn cmd_write_tree() -> anyhow::Result<()> {
-    todo!();
+    let repo = Repository::find_from_current_dir()?;
+    eprintln!("Git repository found in {:?}", repo.path);
+    let mut objects = Vec::new();
+    let tree = build_tree_for_directory(&mut objects, &std::env::current_dir()?)?;
+    let tree = Object::Tree(tree);
+    let tree_hash = tree.hash_string();
+    objects.push(tree);
+
+    for obj in objects.iter() {
+        repo.save_object(obj)?;
+    }
+
+    println!("{tree_hash}");
+    Ok(())
 }
 
 fn main() {
