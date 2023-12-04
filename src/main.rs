@@ -167,6 +167,7 @@ impl Repository {
                 None
             }
         });
+        eprintln!("Container path: {maybe_container_path:?}");
 
         if let Some(container_path) = maybe_container_path {
             let maybe_object_path = fs::read_dir(container_path)?.find_map(|f| {
@@ -179,9 +180,9 @@ impl Repository {
                     None
                 }
             });
-
+            eprintln!("{maybe_object_path:?}");
             if let Some(object_path) = maybe_object_path {
-                let object = Object::from_path(&object_path)?;
+                let object = Object::from_path(&object_path).context("Trying to read object")?;
                 anyhow::ensure!(object_ref.matches(&object.hash_string()));
                 Ok(object)
             } else {
@@ -335,8 +336,13 @@ impl<'a> TryFrom<&'a str> for PersonLine<'a> {
             .ok_or_else(|| anyhow::Error::msg("Could not find timezone"))?;
 
         let name = name.trim();
-        let timestamp = timestamp.parse()?;
-        let timezone = timezone.parse()?;
+        let timestamp = timestamp.parse().context("Trying to parse timestamp")?;
+
+        let timezone = timezone
+            // .strip_prefix("+")
+            // .unwrap_or(timezone)
+            .parse()
+            .with_context(|| format!("Trying to parse timezone: {}", timezone))?;
         Ok(PersonLine {
             name: name.into(),
             email: email.into(),
@@ -373,9 +379,10 @@ impl<'a> TryFrom<&'a str> for CommitData<'a> {
             if line.is_empty() {
                 break;
             }
-            let (tag, value) = value
+            let (tag, value) = line
                 .split_once(' ')
                 .ok_or_else(|| anyhow::Error::msg("Failed to parse header item"))?;
+
             match tag {
                 "tree" => {
                     anyhow::ensure!(tree_hash == None);
@@ -385,11 +392,12 @@ impl<'a> TryFrom<&'a str> for CommitData<'a> {
                 }
                 "author" => {
                     anyhow::ensure!(author == None);
-                    author = Some(PersonLine::try_from(value)?);
+                    author = Some(PersonLine::try_from(value).context("Trying to parse author")?);
                 }
-                "commiter" => {
+                "committer" => {
                     anyhow::ensure!(committer == None);
-                    committer = Some(PersonLine::try_from(value)?);
+                    committer =
+                        Some(PersonLine::try_from(value).context("Trying to parse commiter")?);
                 }
                 "parent" => {
                     anyhow::ensure!(value.chars().all(|c| c.is_ascii_hexdigit()));
@@ -498,7 +506,9 @@ impl Object {
 
         Ok(match object_type {
             "blob" => Object::Blob(object_data.to_owned()),
-            "commit" => Object::Commit(Commit::try_from(object_data)?),
+            "commit" => {
+                Object::Commit(Commit::try_from(object_data).context("Trying to parse commit")?)
+            }
             "tree" => Object::Tree(TreeData {
                 data: object_data.to_owned(),
             }),
@@ -715,13 +725,15 @@ fn cmd_commit_tree(args: CommitTreeArgs) -> anyhow::Result<()> {
         message: args.message.into(),
     };
     for parent in args.parent_hashes {
+        eprintln!("parent {}", parent);
         // Ensure this is a valid object ref that exists
         let parent_ref = ObjectRef::from_sha1(&parent).with_context(|| "Checking parent ref")?;
-        repo.find_object(&parent_ref)?;
+        repo.find_object(&parent_ref)
+            .context("Looking for parent commit")?;
 
         commit.parent_hashes.push(parent.into());
     }
-
+    eprintln!("{:?}", commit);
     let object = Object::Commit(commit.into());
     repo.save_object(&object)?;
     println!("{}", object.hash_string());
