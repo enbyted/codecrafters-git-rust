@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bytes::BufMut;
 use clap::{
     builder::{ValueParser, ValueParserFactory},
@@ -684,14 +685,18 @@ fn cmd_write_tree() -> anyhow::Result<()> {
 }
 
 fn cmd_commit_tree(args: CommitTreeArgs) -> anyhow::Result<()> {
+    eprintln!("commit-tree {:?}", args);
     let repo = Repository::find_from_current_dir()?;
     eprintln!("Git repository found in {:?}", repo.path);
     // First ensure that the provided tree exists
-    let tree = ObjectRef::from_sha1(&args.tree_sha)?;
+    let tree = ObjectRef::from_sha1(&args.tree_sha).with_context(|| "Searching for tree object")?;
     repo.find_object(&tree)?;
 
     let now = SystemTime::now();
-    let epoch_time = now.duration_since(UNIX_EPOCH)?.as_secs();
+    let epoch_time = now
+        .duration_since(UNIX_EPOCH)
+        .with_context(|| "Calculating current time")?
+        .as_secs();
     let mut commit = CommitData {
         tree_hash: args.tree_sha.into(),
         parent_hashes: Vec::new(),
@@ -711,7 +716,7 @@ fn cmd_commit_tree(args: CommitTreeArgs) -> anyhow::Result<()> {
     };
     for parent in args.parent_hashes {
         // Ensure this is a valid object ref that exists
-        let parent_ref = ObjectRef::from_sha1(&parent)?;
+        let parent_ref = ObjectRef::from_sha1(&parent).with_context(|| "Checking parent ref")?;
         repo.find_object(&parent_ref)?;
 
         commit.parent_hashes.push(parent.into());
@@ -735,6 +740,9 @@ fn main() {
 
     if let Err(error) = res {
         eprintln!("Error during command execution: {:?}", error);
+        for err in error.chain() {
+            eprintln!(" Caused by: {:?}", err);
+        }
         panic!("Failed!");
     }
 }
