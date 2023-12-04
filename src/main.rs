@@ -11,6 +11,7 @@ use std::{
     io::Write,
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Parser)]
@@ -25,6 +26,8 @@ enum Subcommand {
     LsTree(LsTreeArgs),
     /// Write current directory as a tree object
     WriteTree,
+    /// Create a commit for given tree
+    CommitTree(CommitTreeArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -55,6 +58,21 @@ struct HashObjectArgs {
     /// Automatically pretty-print based on object type
     #[arg(short)]
     write: bool,
+}
+
+#[derive(Debug, Clone, Args)]
+struct CommitTreeArgs {
+    /// The tree hash to link to this commit
+    #[arg(required(true), index(1))]
+    tree_sha: String,
+
+    /// Parents of the new commit
+    #[arg(short)]
+    parent_hashes: Vec<String>,
+
+    /// The commit message
+    #[arg(short)]
+    message: String,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -292,11 +310,163 @@ impl TreeData {
     }
 }
 
+#[derive(Debug, PartialEq)]
+struct PersonLine<'a> {
+    name: Cow<'a, str>,
+    email: Cow<'a, str>,
+    timestamp: u64,
+    timezone: i32,
+}
+
+impl<'a> TryFrom<&'a str> for PersonLine<'a> {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &'a str) -> Result<Self, Self::Error> {
+        let (name, rest) = value
+            .split_once('<')
+            .ok_or_else(|| anyhow::Error::msg("Could not find beginning of email"))?;
+        let (email, rest) = rest
+            .split_once('>')
+            .ok_or_else(|| anyhow::Error::msg("Could not find end of email"))?;
+        let (timestamp, timezone) = rest
+            .trim()
+            .split_once(' ')
+            .ok_or_else(|| anyhow::Error::msg("Could not find timezone"))?;
+
+        let name = name.trim();
+        let timestamp = timestamp.parse()?;
+        let timezone = timezone.parse()?;
+        Ok(PersonLine {
+            name: name.into(),
+            email: email.into(),
+            timestamp: timestamp,
+            timezone: timezone,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct CommitData<'a> {
+    tree_hash: Cow<'a, str>,
+    parent_hashes: Vec<Cow<'a, str>>,
+    author: PersonLine<'a>,
+    committer: PersonLine<'a>,
+    message: Cow<'a, str>,
+}
+
+impl<'a> TryFrom<&'a str> for CommitData<'a> {
+    type Error = anyhow::Error;
+
+    fn try_from(mut value: &'a str) -> Result<Self, Self::Error> {
+        let mut tree_hash = None;
+        let mut parent_hashes = Vec::new();
+        let mut author = None;
+        let mut committer = None;
+        loop {
+            let (line, rest) = value
+                .split_once('\n')
+                .ok_or_else(|| anyhow::Error::msg("Could not find next commit line"))?;
+            value = rest;
+
+            // Header is separated from message by one empty line
+            if line.is_empty() {
+                break;
+            }
+            let (tag, value) = value
+                .split_once(' ')
+                .ok_or_else(|| anyhow::Error::msg("Failed to parse header item"))?;
+            match tag {
+                "tree" => {
+                    anyhow::ensure!(tree_hash == None);
+                    anyhow::ensure!(value.chars().all(|c| c.is_ascii_hexdigit()));
+                    anyhow::ensure!(value.len() == 40);
+                    tree_hash = Some(value.into());
+                }
+                "author" => {
+                    anyhow::ensure!(author == None);
+                    author = Some(PersonLine::try_from(value)?);
+                }
+                "commiter" => {
+                    anyhow::ensure!(committer == None);
+                    committer = Some(PersonLine::try_from(value)?);
+                }
+                "parent" => {
+                    anyhow::ensure!(value.chars().all(|c| c.is_ascii_hexdigit()));
+                    anyhow::ensure!(value.len() == 40);
+                    parent_hashes.push(value.into());
+                }
+                _ => {
+                    anyhow::bail!("unexpected tag in commit '{}'", tag);
+                }
+            }
+        }
+
+        Ok(CommitData {
+            tree_hash: tree_hash.ok_or_else(|| anyhow::Error::msg("Tree hash not found"))?,
+            parent_hashes,
+            author: author.ok_or_else(|| anyhow::Error::msg("Author not proviced"))?,
+            committer: committer.ok_or_else(|| anyhow::Error::msg("Committer not provided"))?,
+            message: value.into(),
+        })
+    }
+}
+
+impl Into<Commit> for CommitData<'_> {
+    fn into(self) -> Commit {
+        let mut buf = String::new();
+        buf.push_str("tree ");
+        buf.push_str(&self.tree_hash);
+        for parent in self.parent_hashes.iter() {
+            buf.push_str("\nparent ");
+            buf.push_str(parent);
+        }
+        buf.push_str(&format!(
+            "\nauthor {} <{}> {} {:+04}",
+            self.author.name, self.author.email, self.author.timestamp, self.author.timezone
+        ));
+        buf.push_str(&format!(
+            "\ncommitter {} <{}> {} {:+04}",
+            self.committer.name,
+            self.committer.email,
+            self.committer.timestamp,
+            self.committer.timezone
+        ));
+        buf.push('\n');
+        buf.push('\n');
+        buf.push_str(&self.message);
+        Commit(buf)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct Commit(String);
+
+impl TryFrom<&[u8]> for Commit {
+    type Error = anyhow::Error;
+
+    fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
+        let string = std::str::from_utf8(value)?;
+        CommitData::try_from(string)?;
+        Ok(Self(string.to_owned()))
+    }
+}
+
+impl Commit {
+    pub fn data(&self) -> CommitData<'_> {
+        CommitData::try_from(self.0.as_str())
+            .expect("It is invariant that commit contains correct data")
+    }
+
+    pub fn bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
 #[derive(Debug, Clone)]
 enum Object {
     Unknown { kind: String, data: Vec<u8> },
     Blob(Vec<u8>),
-    Commit(String),
+    Commit(Commit),
     Tree(TreeData),
 }
 
@@ -327,7 +497,7 @@ impl Object {
 
         Ok(match object_type {
             "blob" => Object::Blob(object_data.to_owned()),
-            "commit" => Object::Commit(std::str::from_utf8(object_data)?.to_owned()),
+            "commit" => Object::Commit(Commit::try_from(object_data)?),
             "tree" => Object::Tree(TreeData {
                 data: object_data.to_owned(),
             }),
@@ -350,7 +520,7 @@ impl Object {
     pub fn contents_bytes(&self) -> &[u8] {
         match self {
             Object::Blob(data) => data,
-            Object::Commit(text) => text.as_bytes(),
+            Object::Commit(data) => data.bytes(),
             Object::Tree(data) => &data.data,
             Object::Unknown { data, .. } => data,
         }
@@ -395,9 +565,9 @@ fn cmd_cat_file(args: CatFileArgs) -> anyhow::Result<()> {
     let obj = repo.find_object(&args.object)?;
     eprintln!("Found object: {:?}", obj);
     if args.pretty_print {
-        match obj {
+        match &obj {
             Object::Blob(data) => std::io::stdout().lock().write_all(&data)?,
-            Object::Commit(text) => print!("{text}"),
+            Object::Commit(data) => print!("{}", data.0),
             Object::Tree(data) => {
                 for item in data.iter() {
                     let mode = item.mode;
@@ -513,6 +683,46 @@ fn cmd_write_tree() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn cmd_commit_tree(args: CommitTreeArgs) -> anyhow::Result<()> {
+    let repo = Repository::find_from_current_dir()?;
+    eprintln!("Git repository found in {:?}", repo.path);
+    // First ensure that the provided tree exists
+    let tree = ObjectRef::from_sha1(&args.tree_sha)?;
+    repo.find_object(&tree)?;
+
+    let now = SystemTime::now();
+    let epoch_time = now.duration_since(UNIX_EPOCH)?.as_secs();
+    let mut commit = CommitData {
+        tree_hash: args.tree_sha.into(),
+        parent_hashes: Vec::new(),
+        author: PersonLine {
+            name: "John Smith".into(),
+            email: "john.smith@example.com".into(),
+            timestamp: epoch_time,
+            timezone: 0,
+        },
+        committer: PersonLine {
+            name: "John Doe".into(),
+            email: "john.doe@example.com".into(),
+            timestamp: epoch_time,
+            timezone: 0,
+        },
+        message: args.message.into(),
+    };
+    for parent in args.parent_hashes {
+        // Ensure this is a valid object ref that exists
+        let parent_ref = ObjectRef::from_sha1(&parent)?;
+        repo.find_object(&parent_ref)?;
+
+        commit.parent_hashes.push(parent.into());
+    }
+
+    let object = Object::Commit(commit.into());
+    repo.save_object(&object)?;
+    println!("{}", object.hash_string());
+    Ok(())
+}
+
 fn main() {
     let res = match Subcommand::parse() {
         Subcommand::Init => cmd_init(),
@@ -520,6 +730,7 @@ fn main() {
         Subcommand::LsTree(args) => cmd_ls_tree(args),
         Subcommand::HashObject(args) => cmd_hash_object(args),
         Subcommand::WriteTree => cmd_write_tree(),
+        Subcommand::CommitTree(args) => cmd_commit_tree(args),
     };
 
     if let Err(error) = res {
