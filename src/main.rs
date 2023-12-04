@@ -5,6 +5,7 @@ use clap::{
 };
 use sha1::{Digest, Sha1};
 use std::{
+    borrow::Cow,
     fs,
     io::Read,
     io::Write,
@@ -185,8 +186,8 @@ impl Repository {
 #[derive(Debug)]
 struct TreeItem<'a> {
     mode: u32,
-    name: &'a str,
-    hash: &'a [u8; 20],
+    name: Cow<'a, str>,
+    hash: Cow<'a, [u8; 20]>,
 }
 
 impl TreeItem<'_> {
@@ -208,8 +209,8 @@ impl TreeItem<'_> {
             rest,
             TreeItem {
                 mode: u32::from_str_radix(mode, 8)?,
-                name,
-                hash: hash.try_into()?,
+                name: Cow::Borrowed(name),
+                hash: Cow::Borrowed(hash.try_into()?),
             },
         ))
     }
@@ -262,6 +263,32 @@ impl TreeData {
         self.data.put_u8(0);
         self.data.put(&object.hash()[..]);
         Ok(())
+    }
+
+    pub fn add_item(&mut self, item: &TreeItem) {
+        let mode = format!("{:o}", item.mode);
+        self.data.put(mode.as_bytes());
+        self.data.put_u8(b' ');
+        self.data.put(item.name.as_bytes());
+        self.data.put_u8(0);
+        self.data.put(&item.hash[..]);
+    }
+
+    pub fn sort(&mut self) {
+        let mut items: Vec<_> = self
+            .iter()
+            .map(|i| TreeItem {
+                mode: i.mode,
+                name: Cow::Owned(i.name.into_owned()),
+                hash: Cow::Owned(i.hash.into_owned()),
+            })
+            .collect();
+        items.sort_by(|a, b| a.name.cmp(&b.name));
+
+        self.data.clear();
+        for item in items {
+            self.add_item(&item);
+        }
     }
 }
 
@@ -465,6 +492,7 @@ fn build_tree_for_directory(objects: &mut Vec<Object>, path: &Path) -> anyhow::R
         objects.push(object);
     }
 
+    tree.sort();
     Ok(tree)
 }
 
