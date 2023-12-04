@@ -707,6 +707,8 @@ fn cmd_commit_tree(args: CommitTreeArgs) -> anyhow::Result<()> {
         .duration_since(UNIX_EPOCH)
         .with_context(|| "Calculating current time")?
         .as_secs();
+    let mut message = args.message;
+    message.push('\n');
     let mut commit = CommitData {
         tree_hash: args.tree_sha.into(),
         parent_hashes: Vec::new(),
@@ -722,7 +724,7 @@ fn cmd_commit_tree(args: CommitTreeArgs) -> anyhow::Result<()> {
             timestamp: epoch_time,
             timezone: 0,
         },
-        message: args.message.into(),
+        message: message.into(),
     };
     for parent in args.parent_hashes {
         eprintln!("parent {}", parent);
